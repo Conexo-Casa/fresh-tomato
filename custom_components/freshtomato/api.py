@@ -1,265 +1,307 @@
-"""FreshTomato router API client."""
+"""FreshTomato HTTP API client.
+
+FreshTomato uses HTTP Basic Auth and a session-based `_http_id` token.
+Data is retrieved via two endpoints:
+
+  /update.cgi?exec=netdev&_http_id=<id>
+      Returns a JavaScript-style object with per-interface TX/RX counters.
+
+  /update.cgi?exec=wldev&_http_id=<id>
+      Returns a JavaScript-style list of connected wireless clients.
+
+  /status-data.jsx
+      Returns a JSONP-like blob with general router status (uptime, WAN IP,
+      CPU load, memory, firmware version, etc.).
+
+All responses use HTTP Basic Authentication (username / password).
+The _http_id value is a random token embedded in the router UI source; the
+user must look it up once in the router admin page source (search for
+http_id) and enter it during integration setup.
+"""
+
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
 
+from .const import (
+    DEFAULT_VERIFY_SSL,
+    ENDPOINT_STATUS,
+    ENDPOINT_UPDATE,
+    EXEC_NETDEV,
+    EXEC_WLDEV,
+)
+
 _LOGGER = logging.getLogger(__name__)
 
-# Tomato's update.cgi returns JavaScript variable assignments like:
-#   devlist = [...];
-#   netdev = {...};
-#   sysinfo = {...};
-_JS_VAR_RE = re.compile(r"^(\w+)\s*=\s*(.*?);?\s*$", re.MULTILINE | re.DOTALL)
-
-
-@dataclass
-class RouterStats:
-    """All data fetched from the router in a single poll cycle."""
-
-    # Connected devices – list of dicts with mac, ip, name, iface
-    devices: list[dict[str, str]] = field(default_factory=list)
-
-    # Bandwidth in bytes (cumulative counters from the router)
-    net_rx: dict[str, int] = field(default_factory=dict)
-    net_tx: dict[str, int] = field(default_factory=dict)
-
-    # System info
-    uptime: int = 0          # seconds
-    load_1: float = 0.0
-    load_5: float = 0.0
-    load_15: float = 0.0
-    mem_total: int = 0       # kB
-    mem_free: int = 0        # kB
+# Regex to parse Tomato's JS-style "var foo = {...};" or "var foo = [...];"
+_VAR_RE = re.compile(r"var\s+(\w+)\s*=\s*([\s\S]*?);", re.MULTILINE)
 
 
 class FreshTomatoApiError(Exception):
-    """Raised when the API returns an unexpected response."""
+    """Raised when the router returns an unexpected response."""
 
 
 class FreshTomatoAuthError(FreshTomatoApiError):
-    """Raised when authentication fails."""
+    """Raised when credentials are rejected (HTTP 401 / 403)."""
 
 
-class FreshTomatoApi:
-    """Async client for the FreshTomato (Tomato firmware) HTTP API."""
+class FreshTomatoConnectionError(FreshTomatoApiError):
+    """Raised when the router is unreachable."""
+
+
+class FreshTomatoClient:
+    """Async HTTP client for a FreshTomato router."""
 
     def __init__(
         self,
         host: str,
-        http_id: str,
+        port: int,
         username: str,
         password: str,
-        port: int = 80,
-        ssl: bool = False,
-        verify_ssl: bool = True,
+        http_id: str,
+        verify_ssl: bool = DEFAULT_VERIFY_SSL,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._host = host
-        self._http_id = http_id
+        self._port = port
         self._username = username
         self._password = password
-        self._port = port
-        self._ssl = ssl
+        self._http_id = http_id
         self._verify_ssl = verify_ssl
         self._session = session
-        self._own_session = session is None
+        self._owns_session = session is None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def async_init(self) -> None:
+        """Create an aiohttp session if we don't own one."""
+        if self._owns_session:
+            connector = aiohttp.TCPConnector(ssl=self._verify_ssl)
+            self._session = aiohttp.ClientSession(connector=connector)
+
+    async def async_close(self) -> None:
+        """Close the owned session."""
+        if self._owns_session and self._session:
+            await self._session.close()
+            self._session = None
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
 
     @property
     def _base_url(self) -> str:
-        scheme = "https" if self._ssl else "http"
+        scheme = "https" if self._port == 443 else "http"
+        if (scheme == "http" and self._port == 80) or (
+            scheme == "https" and self._port == 443
+        ):
+            return f"{scheme}://{self._host}"
         return f"{scheme}://{self._host}:{self._port}"
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            connector = aiohttp.TCPConnector(ssl=self._verify_ssl if self._ssl else False)
-            self._session = aiohttp.ClientSession(connector=connector)
-            self._own_session = True
-        return self._session
+    @property
+    def _auth(self) -> aiohttp.BasicAuth:
+        return aiohttp.BasicAuth(self._username, self._password)
 
-    async def close(self) -> None:
-        """Close the underlying aiohttp session if we own it."""
-        if self._own_session and self._session and not self._session.closed:
-            await self._session.close()
+    # ------------------------------------------------------------------
+    # Low-level fetch
+    # ------------------------------------------------------------------
 
-    async def _post(self, exec_target: str) -> str:
-        """POST to update.cgi and return the raw response text."""
-        session = await self._get_session()
-        url = f"{self._base_url}/update.cgi"
-        data = {"_http_id": self._http_id, "exec": exec_target}
-        auth = aiohttp.BasicAuth(self._username, self._password)
-
+    async def _get(self, path: str, params: dict[str, str] | None = None) -> str:
+        """Perform a GET request and return the raw text body."""
+        if self._session is None:
+            raise FreshTomatoApiError("Client not initialised; call async_init() first")
+        url = f"{self._base_url}{path}"
         try:
-            async with session.post(
+            async with self._session.get(
                 url,
-                data=data,
-                auth=auth,
-                timeout=aiohttp.ClientTimeout(total=15),
+                params=params,
+                auth=self._auth,
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
-                if resp.status == 401:
+                if resp.status in (401, 403):
                     raise FreshTomatoAuthError(
-                        f"Authentication failed (HTTP 401) for {self._host}"
+                        f"Authentication failed (HTTP {resp.status})"
                     )
                 if resp.status != 200:
                     raise FreshTomatoApiError(
-                        f"Unexpected HTTP {resp.status} from {self._host}"
+                        f"Unexpected HTTP status {resp.status} from {url}"
                     )
                 return await resp.text()
-        except aiohttp.ClientConnectorError as err:
-            raise FreshTomatoApiError(f"Cannot connect to {self._host}: {err}") from err
-        except aiohttp.ServerTimeoutError as err:
-            raise FreshTomatoApiError(f"Timeout connecting to {self._host}") from err
+        except aiohttp.ClientConnectorError as exc:
+            raise FreshTomatoConnectionError(
+                f"Cannot connect to router at {self._base_url}: {exc}"
+            ) from exc
+        except asyncio.TimeoutError as exc:
+            raise FreshTomatoConnectionError(
+                f"Timeout connecting to router at {self._base_url}"
+            ) from exc
 
     # ------------------------------------------------------------------
-    # Parsing helpers
+    # Data parsers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_js_response(text: str) -> dict[str, Any]:
+    def _parse_netdev(raw: str) -> dict[str, dict[str, int]]:
+        """Parse netdev response into {iface: {rx: N, tx: N, rxp: N, txp: N}}.
+
+        The router returns something like:
+            netdev = { 'eth0':{ rx:123456, tx:654321, ... }, ... }
+        We sanitise with regex to make it valid JSON.
         """
-        Tomato's update.cgi returns bare JavaScript variable assignments, e.g.:
+        # Extract the value of `netdev = ...`
+        match = re.search(r"netdev\s*=\s*(\{[\s\S]*?\});", raw)
+        if not match:
+            _LOGGER.debug("netdev raw response: %s", raw[:200])
+            raise FreshTomatoApiError("Could not parse netdev response")
 
-            devlist = [['00:11:22:33:44:55','192.168.1.10','MyPC','br0',0],...];
-            netdev = {
-              'vlan2': {'rx': {'bytes': 12345, ...}, 'tx': {'bytes': 67890, ...}},
-              ...
-            };
+        raw_obj = match.group(1)
 
-        We eval-free parse by extracting each top-level var and then use
-        Python's ast.literal_eval after light sanitisation.
+        # Convert JS-style unquoted keys → quoted keys for json.loads
+        # e.g.  { 'eth0':{ rx:123 } }  →  { "eth0":{ "rx":123 } }
+        cleaned = re.sub(r"'([^']+)'", r'"\1"', raw_obj)
+        cleaned = re.sub(r"(\b\w+\b)\s*:", r'"\1":', cleaned)
+        # Fix double-quoted keys produced by the two passes above
+        cleaned = re.sub(r'"(".*?")"', r"\1", cleaned)
+
+        import json  # local import to avoid circular at module level
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            _LOGGER.debug("Cleaned netdev: %s", cleaned[:400])
+            # Fallback: manual regex extraction
+            return _parse_netdev_fallback(raw_obj)
+
+    @staticmethod
+    def _parse_wldev(raw: str) -> list[dict[str, Any]]:
+        """Parse wldev response into a list of wireless client dicts.
+
+        Response looks like:
+            wldev = [{ mac:'AA:BB:CC:DD:EE:FF', rssi:-65, ... }, ...]
         """
-        import ast
+        match = re.search(r"wldev\s*=\s*(\[[\s\S]*?\]);", raw)
+        if not match:
+            return []
 
+        raw_arr = match.group(1)
+        cleaned = re.sub(r"'([^']+)'", r'"\1"', raw_arr)
+        cleaned = re.sub(r"(\b\w+\b)\s*:", r'"\1":', cleaned)
+        cleaned = re.sub(r'"(".*?")"', r"\1", cleaned)
+
+        import json
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            _LOGGER.debug("Could not parse wldev: %s", cleaned[:400])
+            return []
+
+    @staticmethod
+    def _parse_status(raw: str) -> dict[str, Any]:
+        """Parse status-data.jsx into a flat dict of router state values.
+
+        The page sets JS vars; we capture them all.
+        """
         result: dict[str, Any] = {}
-        for match in _JS_VAR_RE.finditer(text):
-            name, value = match.group(1).strip(), match.group(2).strip()
-            # Convert JS single-quotes to double-quotes for ast
-            py_value = value.replace("'", '"')
+        for m in _VAR_RE.finditer(raw):
+            key = m.group(1)
+            value_str = m.group(2).strip().strip("'\"")
+            # Try numeric conversion
             try:
-                result[name] = ast.literal_eval(py_value)
-            except (ValueError, SyntaxError):
-                _LOGGER.debug("Could not parse JS var %s; skipping", name)
+                if "." in value_str:
+                    result[key] = float(value_str)
+                else:
+                    result[key] = int(value_str)
+            except ValueError:
+                result[key] = value_str
         return result
 
-    @staticmethod
-    def _parse_devlist(raw: list) -> list[dict[str, str]]:
-        """
-        devlist entries: [mac, ip, name, iface, ...]
-        """
-        devices = []
-        for entry in raw:
-            if not isinstance(entry, (list, tuple)) or len(entry) < 4:
-                continue
-            devices.append(
-                {
-                    "mac": str(entry[0]),
-                    "ip": str(entry[1]),
-                    "name": str(entry[2]) if entry[2] else str(entry[1]),
-                    "interface": str(entry[3]),
-                }
-            )
-        return devices
-
-    @staticmethod
-    def _parse_netdev(raw: dict) -> tuple[dict[str, int], dict[str, int]]:
-        """
-        netdev format:
-          { 'iface': {'rx': {'bytes': N, ...}, 'tx': {'bytes': N, ...}}, ... }
-        Returns (rx_map, tx_map) keyed by interface name.
-        """
-        rx: dict[str, int] = {}
-        tx: dict[str, int] = {}
-        for iface, counters in raw.items():
-            if isinstance(counters, dict):
-                rx[iface] = int(counters.get("rx", {}).get("bytes", 0))
-                tx[iface] = int(counters.get("tx", {}).get("bytes", 0))
-        return rx, tx
-
-    @staticmethod
-    def _parse_sysinfo(raw: dict) -> tuple[int, float, float, float, int, int]:
-        """
-        sysinfo format:
-          { 'uptime': N, 'load': [1m_int, 5m_int, 15m_int],
-            'memory': {'total': N, 'free': N, ...} }
-        Load averages are stored as integers × 65536.
-        Returns (uptime_s, load1, load5, load15, mem_total_kb, mem_free_kb).
-        """
-        uptime = int(raw.get("uptime", 0))
-        load_raw = raw.get("load", [0, 0, 0])
-        load_1 = round(load_raw[0] / 65536.0, 2) if len(load_raw) > 0 else 0.0
-        load_5 = round(load_raw[1] / 65536.0, 2) if len(load_raw) > 1 else 0.0
-        load_15 = round(load_raw[2] / 65536.0, 2) if len(load_raw) > 2 else 0.0
-        mem = raw.get("memory", {})
-        mem_total = int(mem.get("total", 0))
-        mem_free = int(mem.get("free", 0))
-        return uptime, load_1, load_5, load_15, mem_total, mem_free
-
     # ------------------------------------------------------------------
-    # Public API
+    # Public API methods
     # ------------------------------------------------------------------
 
-    async def async_get_stats(self) -> RouterStats:
-        """Fetch all router statistics in one coordinated call."""
-        stats = RouterStats()
+    async def async_get_netdev(self) -> dict[str, dict[str, int]]:
+        """Fetch per-interface bandwidth counters."""
+        raw = await self._get(
+            ENDPOINT_UPDATE,
+            params={"exec": EXEC_NETDEV, "_http_id": self._http_id},
+        )
+        return self._parse_netdev(raw)
 
-        # Fetch devlist
-        try:
-            text = await self._post(EXEC_DEVLIST)
-            parsed = self._parse_js_response(text)
-            raw_devlist = parsed.get("devlist", [])
-            stats.devices = self._parse_devlist(raw_devlist)
-        except FreshTomatoApiError:
-            raise
-        except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.warning("Failed to parse devlist: %s", err)
+    async def async_get_wldev(self) -> list[dict[str, Any]]:
+        """Fetch list of connected wireless clients."""
+        raw = await self._get(
+            ENDPOINT_UPDATE,
+            params={"exec": EXEC_WLDEV, "_http_id": self._http_id},
+        )
+        return self._parse_wldev(raw)
 
-        # Fetch netdev
-        try:
-            text = await self._post(EXEC_NETDEV)
-            parsed = self._parse_js_response(text)
-            raw_netdev = parsed.get("netdev", {})
-            stats.net_rx, stats.net_tx = self._parse_netdev(raw_netdev)
-        except FreshTomatoApiError:
-            raise
-        except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.warning("Failed to parse netdev: %s", err)
+    async def async_get_status(self) -> dict[str, Any]:
+        """Fetch general router status (uptime, WAN IP, memory, etc.)."""
+        raw = await self._get(ENDPOINT_STATUS)
+        return self._parse_status(raw)
 
-        # Fetch sysinfo
-        try:
-            text = await self._post(EXEC_SYSINFO)
-            parsed = self._parse_js_response(text)
-            raw_sysinfo = parsed.get("sysinfo", {})
-            (
-                stats.uptime,
-                stats.load_1,
-                stats.load_5,
-                stats.load_15,
-                stats.mem_total,
-                stats.mem_free,
-            ) = self._parse_sysinfo(raw_sysinfo)
-        except FreshTomatoApiError:
-            raise
-        except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.warning("Failed to parse sysinfo: %s", err)
+    async def async_fetch_all(self) -> dict[str, Any]:
+        """Fetch netdev, wldev, and status in parallel."""
+        netdev, wldev, status = await asyncio.gather(
+            self.async_get_netdev(),
+            self.async_get_wldev(),
+            self.async_get_status(),
+            return_exceptions=True,
+        )
 
-        return stats
+        result: dict[str, Any] = {}
+
+        if isinstance(netdev, Exception):
+            _LOGGER.warning("netdev fetch failed: %s", netdev)
+            result["netdev"] = {}
+        else:
+            result["netdev"] = netdev
+
+        if isinstance(wldev, Exception):
+            _LOGGER.warning("wldev fetch failed: %s", wldev)
+            result["wldev"] = []
+        else:
+            result["wldev"] = wldev
+
+        if isinstance(status, Exception):
+            _LOGGER.warning("status fetch failed: %s", status)
+            result["status"] = {}
+        else:
+            result["status"] = status
+
+        return result
 
     async def async_test_connection(self) -> bool:
-        """
-        Test credentials by fetching sysinfo.
-        Raises FreshTomatoAuthError if credentials are wrong.
-        Raises FreshTomatoApiError for other connection problems.
-        Returns True on success.
-        """
-        await self._post(EXEC_SYSINFO)
-        return True
+        """Return True if we can authenticate and reach update.cgi."""
+        try:
+            await self.async_get_netdev()
+            return True
+        except FreshTomatoAuthError:
+            raise
+        except FreshTomatoApiError:
+            return False
 
 
-# Convenience import alias used in other modules
-EXEC_DEVLIST = "devlist"
-EXEC_NETDEV = "netdev"
-EXEC_SYSINFO = "sysinfo"
+# ---------------------------------------------------------------------------
+# Fallback parser (used when JSON clean-up fails)
+# ---------------------------------------------------------------------------
+
+def _parse_netdev_fallback(raw_obj: str) -> dict[str, dict[str, int]]:
+    """Extract interface RX/TX pairs with plain regex as a last resort."""
+    result: dict[str, dict[str, int]] = {}
+    iface_re = re.compile(r"['\"]?([\w.]+)['\"]?\s*:\s*\{([^}]+)\}", re.DOTALL)
+    field_re = re.compile(r"(\w+)\s*:\s*(-?\d+)")
+    for iface_m in iface_re.finditer(raw_obj):
+        iface = iface_m.group(1)
+        fields = {k: int(v) for k, v in field_re.findall(iface_m.group(2))}
+        if fields:
+            result[iface] = fields
+    return result

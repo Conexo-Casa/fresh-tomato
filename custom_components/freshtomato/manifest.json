@@ -1,13 +1,13 @@
 {
   "domain": "freshtomato",
   "name": "FreshTomato Router",
-  "version": "1.0.0",
-  "codeowners": ["@conexo-casa"],
+  "codeowners": [
+    "@Conexo-Casa"
+  ],
   "config_flow": true,
-  "documentation": "https://github.com/conexo-casa/fresh-tomato",
-  "homeassistant": "2024.1.0",
-  "integration_type": "hub",
+  "documentation": "https://github.com/Conexo-Casa/fresh-tomato",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/conexo-casa/fresh-tomato/issues",
-  "requirements": []
+  "issue_tracker": "https://github.com/Conexo-Casa/fresh-tomato/issues",
+  "requirements": [],
+  "version": "1.0.0"
 }

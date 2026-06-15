@@ -1,0 +1,42 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to FreshTomato Router",
+        "description": "Enter the connection details for your FreshTomato router.\n\n**HTTP ID**: Find this in your router admin under Administration → Admin Access → HTTP ID, or run `nvram get http_id` via SSH/Telnet.",
+        "data": {
+          "host": "Router IP or Hostname",
+          "port": "HTTP Port",
+          "username": "Username",
+          "password": "Password",
+          "http_id": "HTTP ID",
+          "ssl": "Use HTTPS",
+          "verify_ssl": "Verify SSL Certificate",
+          "scan_interval": "Polling interval (seconds)"
+        },
+        "data_description": {
+          "http_id": "The internal HTTP token used by the Tomato web UI. Find it via SSH: nvram get http_id",
+          "scan_interval": "How often to poll the router (minimum 10 seconds recommended)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to router. Check host, port, and network.",
+      "invalid_auth": "Invalid username, password, or HTTP ID.",
+      "unknown": "Unexpected error. Check the Home Assistant logs."
+    },
+    "abort": {
+      "already_configured": "This router is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "FreshTomato Options",
+        "data": {
+          "scan_interval": "Polling interval (seconds)"
+        }
+      }
+    }
+  }
+}

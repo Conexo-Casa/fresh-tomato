@@ -1,138 +1,113 @@
-# FreshTomato Router — Home Assistant Integration
+# FreshTomato Router – Home Assistant Integration
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![GitHub release](https://img.shields.io/github/release/conexo-casa/fresh-tomato.svg)](https://github.com/conexo-casa/fresh-tomato/releases)
+[![HACS Custom Repository](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz)
+[![GitHub Release](https://img.shields.io/github/release/Conexo-Casa/fresh-tomato.svg)](https://github.com/Conexo-Casa/fresh-tomato/releases)
 
-A [HACS](https://hacs.xyz)-compatible Home Assistant custom integration for routers running [FreshTomato](https://freshtomato.org/) firmware (also compatible with other Tomato-based firmware such as Shibby, AdvancedTomato).
-
-Tested on **Netgear R7000** running FreshTomato 2026.x.
+A HACS-compatible Home Assistant integration for routers running [FreshTomato](https://freshtomato.org/) firmware (tested on the **Netgear R7000**; should work on any Broadcom-based router running FreshTomato 2020.8+).
 
 ---
 
 ## Features
 
-| Entity type | What it tracks |
+| Category | What you get |
 |---|---|
-| **Sensors** | WAN download/upload bytes, LAN RX/TX, WiFi 2.4 GHz RX/TX, WiFi 5 GHz RX/TX, system uptime, load averages (1 / 5 / 15 min), memory total / free / used, connected device count |
-| **Device Trackers** | Every device currently shown in the router's device list (MAC, IP, hostname, interface) |
+| **Status sensors** | WAN IP, Uptime, CPU load, Free/Total memory, Firmware version |
+| **Network sensors** | Per-interface RX and TX byte counters (vlan1, eth0, br0, …) |
+| **Wireless clients** | Count of connected Wi-Fi devices |
+| **Device tracking** | One `device_tracker` entity per connected wireless client |
 
 ---
 
 ## Prerequisites
 
-1. FreshTomato (or Tomato/Shibby/AdvancedTomato) running on a Broadcom-based router.
-2. HTTP access to the router's admin interface from your Home Assistant host.
-3. Your **HTTP ID** — the internal token used by the Tomato web UI.
+1. A router running **FreshTomato** firmware (Broadcom chipset).
+2. Your router's **admin username and password**.
+3. The router's **HTTP ID** — a session token used by the Tomato web UI.
 
 ### Finding your HTTP ID
 
-**Option A — Router web UI:**  
-Administration → Admin Access → HTTP ID
-
-**Option B — SSH / Telnet:**
-```bash
-nvram get http_id
-```
-The value looks like `TID16e6c81d29d9b44d`.
+1. Log in to your router's admin page (e.g. `http://192.168.1.1`).
+2. Open any page (e.g. the Overview/Status page).
+3. In your browser, view the page source (`Ctrl+U` / `Cmd+U`).
+4. Search (`Ctrl+F`) for `http_id`.
+5. Copy the value — it looks like `TomXXXXXXXX` or an 8-character alphanumeric string.
 
 ---
 
 ## Installation via HACS
 
-1. Open HACS → **Integrations** → three-dot menu → **Custom repositories**.
-2. Add `https://github.com/conexo-casa/fresh-tomato` with category **Integration**.
-3. Click **Download** on the FreshTomato Router card.
-4. Restart Home Assistant.
-
----
+1. In Home Assistant, go to **HACS → Integrations**.
+2. Click the three-dot menu (⋮) → **Custom repositories**.
+3. Add `https://github.com/Conexo-Casa/fresh-tomato` with category **Integration**.
+4. Search for **FreshTomato Router** and click **Download**.
+5. Restart Home Assistant.
 
 ## Manual Installation
 
-```bash
-cp -r custom_components/freshtomato \
-      <config_dir>/custom_components/freshtomato
-```
-Restart Home Assistant.
+1. Copy the `custom_components/freshtomato` folder into your HA `config/custom_components/` directory.
+2. Restart Home Assistant.
 
 ---
 
 ## Configuration
 
 1. Go to **Settings → Devices & Services → Add Integration**.
-2. Search for **FreshTomato**.
+2. Search for **FreshTomato Router**.
 3. Fill in the form:
 
-| Field | Description |
-|---|---|
-| **Router IP / Hostname** | e.g. `192.168.1.1` |
-| **HTTP Port** | Default `80`; use `443` with HTTPS |
-| **Username** | Router admin username (usually `admin` or `root`) |
-| **Password** | Router admin password |
-| **HTTP ID** | See above — looks like `TID16e6c81d29d9b44d` |
-| **Use HTTPS** | Enable if your router uses HTTPS |
-| **Verify SSL** | Disable if using a self-signed certificate |
-| **Polling interval** | Seconds between polls (default 30) |
-
----
-
-## Sensor Reference
-
-All sensors belong to the **FreshTomato Router** device.
-
-| Sensor | Unit | Notes |
+| Field | Description | Default |
 |---|---|---|
-| WAN Download | bytes | Cumulative counter on `vlan2` |
-| WAN Upload | bytes | Cumulative counter on `vlan2` |
-| LAN RX / TX | bytes | Bridge `br0` |
-| WiFi 2.4 GHz RX / TX | bytes | Interface `eth1` |
-| WiFi 5 GHz RX / TX | bytes | Interface `eth2` (R7000) |
-| Uptime | seconds | Use HA template to convert to days/hours |
-| Load Average 1m / 5m / 15m | — | Linux-style load averages |
-| Memory Total / Free / Used | kB | |
-| Connected Devices | devices | Count of active DHCP/ARP entries |
+| Router IP / Hostname | LAN IP of your router | — |
+| HTTP Port | Web UI port | `80` |
+| Admin Username | Router admin username | `admin` |
+| Admin Password | Router admin password | — |
+| HTTP ID | Session token (see above) | — |
+| Verify SSL | Enable only if you have a valid cert | `false` |
 
-> **Note on interface names:** Interface names (`vlan2`, `eth1`, `eth2`, etc.) vary by router model and firmware build. If WAN or WiFi sensors show `unavailable`, check your router's Status → Overview page and open a GitHub issue with your interface names.
+### Options
+
+After setup you can change the **poll interval** (10–3600 seconds, default 30 s) via **Settings → Devices & Services → FreshTomato Router → Configure**.
 
 ---
 
-## Device Tracker
+## Entities Created
 
-Each device that appears in your router's device list gets a `device_tracker` entity. These update every polling cycle and can be used in presence-detection automations.
+### Sensors
 
-```yaml
-# Example automation: notify when a device joins the network
-automation:
-  - alias: "Phone arrived home"
-    trigger:
-      - platform: state
-        entity_id: device_tracker.my_phone
-        to: "home"
-    action:
-      - service: notify.mobile_app
-        data:
-          message: "Welcome home!"
-```
+| Entity | Description | Unit |
+|---|---|---|
+| `sensor.freshtomato_wan_ip_address` | Current WAN IP | — |
+| `sensor.freshtomato_uptime` | Router uptime | s |
+| `sensor.freshtomato_cpu_load_1_min` | 1-minute CPU load average | % |
+| `sensor.freshtomato_free_memory` | Free RAM | B |
+| `sensor.freshtomato_total_memory` | Total RAM | B |
+| `sensor.freshtomato_firmware_version` | Installed firmware version | — |
+| `sensor.freshtomato_wireless_clients` | Connected wireless clients | — |
+| `sensor.freshtomato_<iface>_rx_bytes` | Bytes received on interface | B |
+| `sensor.freshtomato_<iface>_tx_bytes` | Bytes sent on interface | B |
+
+### Device Trackers
+
+One `device_tracker.<mac_address>` entity per wireless client.
+Note: the Tomato HTTP API only exposes **wireless** clients. Wired-only devices are not tracked (same limitation as the built-in HA Tomato integration).
 
 ---
 
 ## Troubleshooting
 
-**`cannot_connect`** — Verify the router IP is reachable from HA, and that port 80 (or 443) is not firewalled.
-
-**`invalid_auth`** — Double-check username, password, and HTTP ID. The HTTP ID must exactly match the `http_id` nvram variable.
-
-**Sensors stuck at `unavailable`** — The integration polls three separate CGI endpoints. If any one fails, only that group of sensors is affected. Check the HA logs for details.
-
-**Interface names wrong** — The sensor definitions use common R7000 interface names. You can file an issue with your router model and interface names to get them added.
-
----
-
-## Contributing
-
-Issues and PRs welcome at [github.com/conexo-casa/fresh-tomato](https://github.com/conexo-casa/fresh-tomato).
+| Symptom | Fix |
+|---|---|
+| "Cannot connect" during setup | Check the router IP and port; ensure the router's web UI is reachable from the HA host |
+| "Invalid auth" during setup | Double-check username, password, and HTTP ID |
+| Sensors show `unknown` | The router may not expose all status fields; check HA logs for parse warnings |
+| No wireless clients tracked | Confirm Wi-Fi is active and `wldev` endpoint returns data (try `http://<router>/update.cgi?exec=wldev&_http_id=<id>` in a browser) |
 
 ---
+
+## About Conexo-Casa
+
+[Conexo-Casa](https://github.com/Conexo-Casa) is a 501(c)(3) non-profit building accessible home-automation tools for people with neurocognitive impairments and the elderly.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

@@ -1,8 +1,22 @@
-"""Sensor platform for FreshTomato router."""
+"""Sensor platform for FreshTomato integration.
+
+Sensors provided:
+  - WAN IP address
+  - WAN uptime (seconds)
+  - CPU load (1-min average)
+  - Free memory (bytes)
+  - Total memory (bytes)
+  - Firmware version
+  - Connected wireless clients (count)
+  - Per-interface RX bytes  (vlan1, eth0, br0, …)
+  - Per-interface TX bytes
+"""
+
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -13,7 +27,6 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_HOST,
-    UnitOfDataRate,
     UnitOfInformation,
     UnitOfTime,
 )
@@ -22,175 +35,100 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api import RouterStats
-from .const import DOMAIN
+from .const import DOMAIN, MANUFACTURER
 from .coordinator import FreshTomatoCoordinator
 
+_LOGGER = logging.getLogger(__name__)
 
-@dataclass(frozen=True)
-class FreshTomatoSensorEntityDescription(SensorEntityDescription):
-    """Describes a FreshTomato sensor."""
-
-    value_fn: Callable[[RouterStats], float | int | str | None] = lambda _: None
+# WAN interfaces to track bandwidth for (most common on Tomato routers)
+_TRACKED_INTERFACES = ("vlan1", "vlan2", "eth0", "eth1", "br0", "ppp0")
 
 
-def _iface_rx(iface: str) -> Callable[[RouterStats], int | None]:
-    return lambda s: s.net_rx.get(iface)
+@dataclass(frozen=True, kw_only=True)
+class FreshTomatoSensorDescription(SensorEntityDescription):
+    """Extends SensorEntityDescription with a value extractor."""
+
+    value_fn: Callable[[dict[str, Any]], Any]
 
 
-def _iface_tx(iface: str) -> Callable[[RouterStats], int | None]:
-    return lambda s: s.net_tx.get(iface)
+# ---------------------------------------------------------------------------
+# Static sensors (from status-data.jsx)
+# ---------------------------------------------------------------------------
 
-
-SENSOR_DESCRIPTIONS: tuple[FreshTomatoSensorEntityDescription, ...] = (
-    # --- WAN bandwidth ---
-    FreshTomatoSensorEntityDescription(
-        key="wan_rx_bytes",
-        name="WAN Download",
-        icon="mdi:download-network",
-        native_unit_of_measurement=UnitOfInformation.BYTES,
-        device_class=SensorDeviceClass.DATA_SIZE,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=_iface_rx("vlan2"),
+STATIC_SENSORS: tuple[FreshTomatoSensorDescription, ...] = (
+    FreshTomatoSensorDescription(
+        key="wan_ip",
+        name="WAN IP Address",
+        icon="mdi:ip-network",
+        value_fn=lambda d: d.get("status", {}).get("wanip") or d.get("status", {}).get("wan_ip"),
     ),
-    FreshTomatoSensorEntityDescription(
-        key="wan_tx_bytes",
-        name="WAN Upload",
-        icon="mdi:upload-network",
-        native_unit_of_measurement=UnitOfInformation.BYTES,
-        device_class=SensorDeviceClass.DATA_SIZE,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=_iface_tx("vlan2"),
-    ),
-    # --- LAN bandwidth ---
-    FreshTomatoSensorEntityDescription(
-        key="lan_rx_bytes",
-        name="LAN RX",
-        icon="mdi:lan-connect",
-        native_unit_of_measurement=UnitOfInformation.BYTES,
-        device_class=SensorDeviceClass.DATA_SIZE,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=_iface_rx("br0"),
-    ),
-    FreshTomatoSensorEntityDescription(
-        key="lan_tx_bytes",
-        name="LAN TX",
-        icon="mdi:lan-pending",
-        native_unit_of_measurement=UnitOfInformation.BYTES,
-        device_class=SensorDeviceClass.DATA_SIZE,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=_iface_tx("br0"),
-    ),
-    # --- WiFi 2.4 GHz ---
-    FreshTomatoSensorEntityDescription(
-        key="wl0_rx_bytes",
-        name="WiFi 2.4 GHz RX",
-        icon="mdi:wifi-arrow-down",
-        native_unit_of_measurement=UnitOfInformation.BYTES,
-        device_class=SensorDeviceClass.DATA_SIZE,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=_iface_rx("eth1"),
-    ),
-    FreshTomatoSensorEntityDescription(
-        key="wl0_tx_bytes",
-        name="WiFi 2.4 GHz TX",
-        icon="mdi:wifi-arrow-up",
-        native_unit_of_measurement=UnitOfInformation.BYTES,
-        device_class=SensorDeviceClass.DATA_SIZE,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=_iface_tx("eth1"),
-    ),
-    # --- WiFi 5 GHz ---
-    FreshTomatoSensorEntityDescription(
-        key="wl1_rx_bytes",
-        name="WiFi 5 GHz RX",
-        icon="mdi:wifi-arrow-down",
-        native_unit_of_measurement=UnitOfInformation.BYTES,
-        device_class=SensorDeviceClass.DATA_SIZE,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=_iface_rx("eth2"),
-    ),
-    FreshTomatoSensorEntityDescription(
-        key="wl1_tx_bytes",
-        name="WiFi 5 GHz TX",
-        icon="mdi:wifi-arrow-up",
-        native_unit_of_measurement=UnitOfInformation.BYTES,
-        device_class=SensorDeviceClass.DATA_SIZE,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=_iface_tx("eth2"),
-    ),
-    # --- System ---
-    FreshTomatoSensorEntityDescription(
+    FreshTomatoSensorDescription(
         key="uptime",
         name="Uptime",
-        icon="mdi:timer-outline",
+        icon="mdi:clock-outline",
         native_unit_of_measurement=UnitOfTime.SECONDS,
-        device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda s: s.uptime,
+        value_fn=lambda d: d.get("status", {}).get("uptime"),
     ),
-    FreshTomatoSensorEntityDescription(
-        key="load_1m",
-        name="Load Average 1m",
-        icon="mdi:chart-line",
-        native_unit_of_measurement=None,
+    FreshTomatoSensorDescription(
+        key="cpu_load",
+        name="CPU Load (1 min)",
+        icon="mdi:cpu-64-bit",
+        native_unit_of_measurement="%",
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda s: s.load_1,
+        value_fn=lambda d: _cpu_load(d),
     ),
-    FreshTomatoSensorEntityDescription(
-        key="load_5m",
-        name="Load Average 5m",
-        icon="mdi:chart-line",
-        native_unit_of_measurement=None,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda s: s.load_5,
-    ),
-    FreshTomatoSensorEntityDescription(
-        key="load_15m",
-        name="Load Average 15m",
-        icon="mdi:chart-line",
-        native_unit_of_measurement=None,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda s: s.load_15,
-    ),
-    FreshTomatoSensorEntityDescription(
-        key="mem_total",
-        name="Memory Total",
-        icon="mdi:memory",
-        native_unit_of_measurement=UnitOfInformation.KILOBYTES,
-        device_class=SensorDeviceClass.DATA_SIZE,
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_registry_enabled_default=False,
-        value_fn=lambda s: s.mem_total,
-    ),
-    FreshTomatoSensorEntityDescription(
+    FreshTomatoSensorDescription(
         key="mem_free",
-        name="Memory Free",
+        name="Free Memory",
         icon="mdi:memory",
-        native_unit_of_measurement=UnitOfInformation.KILOBYTES,
+        native_unit_of_measurement=UnitOfInformation.BYTES,
         device_class=SensorDeviceClass.DATA_SIZE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda s: s.mem_free,
+        value_fn=lambda d: d.get("status", {}).get("memfree"),
     ),
-    FreshTomatoSensorEntityDescription(
-        key="mem_used",
-        name="Memory Used",
+    FreshTomatoSensorDescription(
+        key="mem_total",
+        name="Total Memory",
         icon="mdi:memory",
-        native_unit_of_measurement=UnitOfInformation.KILOBYTES,
+        native_unit_of_measurement=UnitOfInformation.BYTES,
         device_class=SensorDeviceClass.DATA_SIZE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda s: (s.mem_total - s.mem_free) if s.mem_total else None,
+        value_fn=lambda d: d.get("status", {}).get("memtotal"),
     ),
-    FreshTomatoSensorEntityDescription(
-        key="connected_devices",
-        name="Connected Devices",
-        icon="mdi:devices",
-        native_unit_of_measurement="devices",
+    FreshTomatoSensorDescription(
+        key="firmware",
+        name="Firmware Version",
+        icon="mdi:router-wireless",
+        value_fn=lambda d: d.get("status", {}).get("version") or d.get("status", {}).get("firmware"),
+    ),
+    FreshTomatoSensorDescription(
+        key="wl_clients",
+        name="Wireless Clients",
+        icon="mdi:wifi",
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda s: len(s.devices),
+        value_fn=lambda d: len(d.get("wldev", [])),
     ),
 )
 
+
+def _cpu_load(data: dict[str, Any]) -> float | None:
+    """Return the 1-minute CPU load average as a percentage (0-100)."""
+    status = data.get("status", {})
+    # Status page may expose cpu_load as "0.12 0.08 0.05" (1/5/15 min)
+    raw = status.get("cpu_load") or status.get("cpuload")
+    if raw is None:
+        return None
+    try:
+        one_min = str(raw).split()[0]
+        return round(float(one_min) * 100, 1)
+    except (IndexError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Platform setup
+# ---------------------------------------------------------------------------
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -198,42 +136,93 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up FreshTomato sensors."""
-    coordinator: FreshTomatoCoordinator = hass.data[DOMAIN][entry.entry_id]
+    data = hass.data[DOMAIN][entry.entry_id]
+    coordinator: FreshTomatoCoordinator = data["coordinator"]
     host = entry.data[CONF_HOST]
 
-    async_add_entities(
-        FreshTomatoSensor(coordinator, description, host, entry.entry_id)
-        for description in SENSOR_DESCRIPTIONS
+    entities: list[SensorEntity] = []
+
+    # Static sensors
+    for desc in STATIC_SENSORS:
+        entities.append(FreshTomatoSensor(coordinator, entry, host, desc))
+
+    # Per-interface bandwidth sensors (RX + TX) — discovered dynamically
+    netdev: dict[str, Any] = coordinator.data.get("netdev", {}) if coordinator.data else {}
+    for iface in netdev:
+        for direction in ("rx", "tx"):
+            entities.append(
+                FreshTomatoBandwidthSensor(coordinator, entry, host, iface, direction)
+            )
+
+    async_add_entities(entities)
+
+
+# ---------------------------------------------------------------------------
+# Entity classes
+# ---------------------------------------------------------------------------
+
+def _device_info(entry: ConfigEntry, host: str) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=f"FreshTomato Router ({host})",
+        manufacturer=MANUFACTURER,
+        model="FreshTomato",
+        configuration_url=f"http://{host}",
     )
 
 
 class FreshTomatoSensor(CoordinatorEntity[FreshTomatoCoordinator], SensorEntity):
-    """A sensor entity for FreshTomato router data."""
+    """A single static sensor."""
 
-    entity_description: FreshTomatoSensorEntityDescription
+    entity_description: FreshTomatoSensorDescription
     _attr_has_entity_name = True
 
     def __init__(
         self,
         coordinator: FreshTomatoCoordinator,
-        description: FreshTomatoSensorEntityDescription,
+        entry: ConfigEntry,
         host: str,
-        entry_id: str,
+        description: FreshTomatoSensorDescription,
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
-        self._host = host
-        self._attr_unique_id = f"{entry_id}_{description.key}"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry_id)},
-            name=f"FreshTomato ({host})",
-            manufacturer="FreshTomato",
-            model="Broadcom Router",
-            configuration_url=f"http://{host}",
-        )
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_device_info = _device_info(entry, host)
 
     @property
-    def native_value(self) -> float | int | str | None:
+    def native_value(self) -> Any:
         if self.coordinator.data is None:
             return None
         return self.entity_description.value_fn(self.coordinator.data)
+
+
+class FreshTomatoBandwidthSensor(CoordinatorEntity[FreshTomatoCoordinator], SensorEntity):
+    """RX or TX byte counter for a network interface."""
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = UnitOfInformation.BYTES
+    _attr_device_class = SensorDeviceClass.DATA_SIZE
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:network"
+
+    def __init__(
+        self,
+        coordinator: FreshTomatoCoordinator,
+        entry: ConfigEntry,
+        host: str,
+        iface: str,
+        direction: str,  # "rx" or "tx"
+    ) -> None:
+        super().__init__(coordinator)
+        self._iface = iface
+        self._direction = direction
+        self._attr_name = f"{iface.upper()} {direction.upper()} Bytes"
+        self._attr_unique_id = f"{entry.entry_id}_netdev_{iface}_{direction}"
+        self._attr_device_info = _device_info(entry, host)
+
+    @property
+    def native_value(self) -> int | None:
+        if self.coordinator.data is None:
+            return None
+        iface_data = self.coordinator.data.get("netdev", {}).get(self._iface, {})
+        return iface_data.get(self._direction)

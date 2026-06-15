@@ -3,27 +3,21 @@
     "step": {
       "user": {
         "title": "Connect to FreshTomato Router",
-        "description": "Enter the connection details for your FreshTomato router.\n\n**HTTP ID**: Find this in your router admin under Administration → Admin Access → HTTP ID, or run `nvram get http_id` via SSH/Telnet.",
+        "description": "Enter the connection details for your FreshTomato router.\n\nTo find your **HTTP ID**: log in to the router admin UI, open any page, and search the page source for `http_id`. It looks like a random 8-character string.",
         "data": {
-          "host": "Router IP or Hostname",
+          "host": "Router IP Address or Hostname",
           "port": "HTTP Port",
-          "username": "Username",
-          "password": "Password",
-          "http_id": "HTTP ID",
-          "ssl": "Use HTTPS",
-          "verify_ssl": "Verify SSL Certificate",
-          "scan_interval": "Polling interval (seconds)"
-        },
-        "data_description": {
-          "http_id": "The internal HTTP token used by the Tomato web UI. Find it via SSH: nvram get http_id",
-          "scan_interval": "How often to poll the router (minimum 10 seconds recommended)"
+          "username": "Admin Username",
+          "password": "Admin Password",
+          "http_id": "HTTP ID (from router page source)",
+          "verify_ssl": "Verify SSL Certificate"
         }
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect to router. Check host, port, and network.",
-      "invalid_auth": "Invalid username, password, or HTTP ID.",
-      "unknown": "Unexpected error. Check the Home Assistant logs."
+      "cannot_connect": "Cannot connect to the router. Check the IP address and port.",
+      "invalid_auth": "Invalid credentials. Check username, password, and HTTP ID.",
+      "unknown": "Unexpected error. Check Home Assistant logs for details."
     },
     "abort": {
       "already_configured": "This router is already configured."
@@ -34,7 +28,7 @@
       "init": {
         "title": "FreshTomato Options",
         "data": {
-          "scan_interval": "Polling interval (seconds)"
+          "scan_interval": "Poll interval (seconds)"
         }
       }
     }

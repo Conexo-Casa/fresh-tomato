@@ -1,31 +1,34 @@
 """Constants for the FreshTomato integration."""
 
 DOMAIN = "freshtomato"
-DEFAULT_NAME = "FreshTomato Router"
-DEFAULT_PORT = 80
-DEFAULT_SCAN_INTERVAL = 30  # seconds
+MANUFACTURER = "FreshTomato"
 
+# Config entry keys
+CONF_HOST = "host"
+CONF_PORT = "port"
+CONF_USERNAME = "username"
+CONF_PASSWORD = "password"
 CONF_HTTP_ID = "http_id"
-CONF_SSL = "ssl"
 CONF_VERIFY_SSL = "verify_ssl"
+CONF_SCAN_INTERVAL = "scan_interval"
 
-# update.cgi exec targets
-EXEC_DEVLIST = "devlist"
+# Defaults
+DEFAULT_PORT = 80
+DEFAULT_USERNAME = "admin"
+DEFAULT_SCAN_INTERVAL = 30  # seconds
+DEFAULT_VERIFY_SSL = False
+
+# FreshTomato HTTP API paths
+ENDPOINT_UPDATE = "/update.cgi"
+ENDPOINT_STATUS = "/status-data.jsx"
+
+# update.cgi exec parameters
 EXEC_NETDEV = "netdev"
-EXEC_SYSINFO = "sysinfo"
+EXEC_WLDEV = "wldev"
 
-# Sensor unique-id suffixes
-SENSOR_WAN_RX = "wan_rx"
-SENSOR_WAN_TX = "wan_tx"
-SENSOR_LAN_RX = "lan_rx"
-SENSOR_LAN_TX = "lan_tx"
-SENSOR_WLAN0_RX = "wlan0_rx"
-SENSOR_WLAN0_TX = "wlan0_tx"
-SENSOR_UPTIME = "uptime"
-SENSOR_LOAD_1 = "load_1m"
-SENSOR_LOAD_5 = "load_5m"
-SENSOR_LOAD_15 = "load_15m"
-SENSOR_MEM_TOTAL = "mem_total"
-SENSOR_MEM_FREE = "mem_free"
-SENSOR_MEM_USED = "mem_used"
-SENSOR_CONNECTED_DEVICES = "connected_devices"
+# Coordinator keys
+DATA_ROUTER = "router"
+DATA_DEVICES = "devices"
+
+# Sensor unique ID prefixes
+SENSOR_PREFIX = f"{DOMAIN}_"

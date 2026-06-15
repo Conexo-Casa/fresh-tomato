@@ -1,29 +1,31 @@
 """Config flow for FreshTomato integration."""
+
 from __future__ import annotations
 
 import logging
 from typing import Any
 
 import voluptuous as vol
-from homeassistant import config_entries
-from homeassistant.const import (
-    CONF_HOST,
-    CONF_PASSWORD,
-    CONF_PORT,
-    CONF_SCAN_INTERVAL,
-    CONF_USERNAME,
-)
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import FreshTomatoApi, FreshTomatoApiError, FreshTomatoAuthError
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
+from homeassistant.core import callback
+from homeassistant.data_entry_flow import FlowResult
+import homeassistant.helpers.config_validation as cv
+
+from .api import (
+    FreshTomatoAuthError,
+    FreshTomatoClient,
+    FreshTomatoConnectionError,
+)
 from .const import (
     CONF_HTTP_ID,
-    CONF_SSL,
+    CONF_SCAN_INTERVAL,
     CONF_VERIFY_SSL,
-    DEFAULT_NAME,
     DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_USERNAME,
+    DEFAULT_VERIFY_SSL,
     DOMAIN,
 )
 
@@ -32,18 +34,24 @@ _LOGGER = logging.getLogger(__name__)
 STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
-        vol.Optional(CONF_PORT, default=DEFAULT_PORT): int,
-        vol.Required(CONF_USERNAME, default="admin"): str,
+        vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
+        vol.Optional(CONF_USERNAME, default=DEFAULT_USERNAME): str,
         vol.Required(CONF_PASSWORD): str,
         vol.Required(CONF_HTTP_ID): str,
-        vol.Optional(CONF_SSL, default=False): bool,
-        vol.Optional(CONF_VERIFY_SSL, default=True): bool,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): int,
+        vol.Optional(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): bool,
+    }
+)
+
+OPTIONS_SCHEMA = vol.Schema(
+    {
+        vol.Optional(
+            CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL
+        ): vol.All(int, vol.Range(min=10, max=3600)),
     }
 )
 
 
-class FreshTomatoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class FreshTomatoConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for FreshTomato."""
 
     VERSION = 1
@@ -51,79 +59,77 @@ class FreshTomatoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Handle the initial step."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            host = user_input[CONF_HOST]
-            await self.async_set_unique_id(host)
-            self._abort_if_unique_id_configured()
-
-            session = async_get_clientsession(self.hass, user_input.get(CONF_VERIFY_SSL, True))
-            api = FreshTomatoApi(
-                host=host,
-                http_id=user_input[CONF_HTTP_ID],
+            client = FreshTomatoClient(
+                host=user_input[CONF_HOST],
+                port=user_input[CONF_PORT],
                 username=user_input[CONF_USERNAME],
                 password=user_input[CONF_PASSWORD],
-                port=user_input.get(CONF_PORT, DEFAULT_PORT),
-                ssl=user_input.get(CONF_SSL, False),
-                verify_ssl=user_input.get(CONF_VERIFY_SSL, True),
-                session=session,
+                http_id=user_input[CONF_HTTP_ID],
+                verify_ssl=user_input[CONF_VERIFY_SSL],
             )
-
+            await client.async_init()
             try:
-                await api.async_test_connection()
+                await client.async_test_connection()
             except FreshTomatoAuthError:
                 errors["base"] = "invalid_auth"
-            except FreshTomatoApiError:
+            except FreshTomatoConnectionError:
                 errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
+            except Exception:  # noqa: BLE001
                 _LOGGER.exception("Unexpected error during FreshTomato setup")
                 errors["base"] = "unknown"
             else:
+                await client.async_close()
+                await self.async_set_unique_id(
+                    f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}"
+                )
+                self._abort_if_unique_id_configured()
                 return self.async_create_entry(
-                    title=f"FreshTomato ({host})",
+                    title=user_input[CONF_HOST],
                     data=user_input,
                 )
+            finally:
+                await client.async_close()
 
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_SCHEMA,
             errors=errors,
-            description_placeholders={
-                "http_id_hint": (
-                    "Find your HTTP ID in the router admin: "
-                    "Administration → Admin Access → HTTP ID, "
-                    "or via SSH/Telnet: nvram get http_id"
-                )
-            },
         )
 
     @staticmethod
-    def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
-    ) -> FreshTomatoOptionsFlow:
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the options flow handler."""
         return FreshTomatoOptionsFlow(config_entry)
 
 
-class FreshTomatoOptionsFlow(config_entries.OptionsFlow):
-    """Handle options for FreshTomato."""
+class FreshTomatoOptionsFlow(OptionsFlow):
+    """Handle FreshTomato options."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+    def __init__(self, config_entry: ConfigEntry) -> None:
         self._config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Manage the options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current = self._config_entry.data
-        schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_SCAN_INTERVAL,
-                    default=current.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-                ): int,
-            }
+        current_interval = self._config_entry.options.get(
+            CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_SCAN_INTERVAL, default=current_interval
+                    ): vol.All(int, vol.Range(min=10, max=3600)),
+                }
+            ),
+        )
